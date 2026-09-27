@@ -337,7 +337,6 @@ def compile_jit(jit_or_fn, input_keys_or_make_inputs, make_queues=None, make_ran
   print(f'pickle round trip ({benchmark_runs} runs per seed)')
   with tempfile.TemporaryFile(dir=".") as f:
     dump_oob(jit, f)
-    del jit
     if clear_refs:
       clear_refs()
     gc.collect()
@@ -349,7 +348,7 @@ def compile_jit(jit_or_fn, input_keys_or_make_inputs, make_queues=None, make_ran
     actual = run_eval(loaded_jit, seed, benchmark_runs)
     for ref, val in zip(reference, actual, strict=True):
       np.testing.assert_array_equal(ref, val)
-  return loaded_jit
+  return jit
 
 
 def _parse_size(size_str: str) -> tuple[int, int]:

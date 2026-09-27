@@ -376,28 +376,6 @@ def _load_policy_runners(args: argparse.Namespace) -> tuple[list, list]:
   return runners, keys
 
 
-def _compile_unified_resolution_worker(cam_w, cam_h, supercombo_onnx, model_w, model_h, derived_frame_skip, benchmark_runs, result_path):
-  os.environ['GMMU'] = '0'
-  model_metadata = make_metadata_dict(supercombo_onnx)
-  model_runner = OnnxRunner(supercombo_onnx)
-  features_slice = model_metadata['output_slices']['hidden_state']
-  run_policy = make_run_policy(None, [model_runner], features_slice, derived_frame_skip, model_metadata['input_shapes'])
-  nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-  frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
-  make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip,
-                              frame_copy_size=frame_copy_size)
-  warp = stock.make_warp(nv12, model_w, model_h)
-  run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
-
-  def cleanup_unified():
-    nonlocal run_model_jit, run_policy, model_runner, warp
-    run_model_jit, run_policy, model_runner, warp = None, None, None, None
-  compiled_jit = compile_jit(
-    run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=benchmark_runs, clear_refs=cleanup_unified)
-  result_data = (compiled_jit, Device.DEFAULT)
-  with open(result_path, "wb") as f:
-    dump_oob(result_data, f)
-
 def _compile_warp_resolution_worker(cam_w, cam_h, model_w, model_h, benchmark_runs, result_path):
   os.environ['GMMU'] = '0'
   nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
@@ -460,29 +438,24 @@ if __name__ == "__main__":
 
   if is_unified_supercombo:
     output_data['metadata'] = {'model': model_metadata, **model_metadata}
-    ctx = mp.get_context('spawn')
-    output_data['input_devices'] = {}
-    tmp_files = []
+    output_data['input_devices'] = {'model': Device.DEFAULT}
+    model_runner = OnnxRunner(args.supercombo_onnx)
+    features_slice = model_metadata['output_slices']['hidden_state']
+    run_policy = make_run_policy(None, [model_runner], features_slice, derived_frame_skip, model_metadata['input_shapes'])
     for cam_w, cam_h in set(args.camera_resolutions):
       print(f"Compiling unified model JIT for {cam_w}x{cam_h}")
-      tmp_res = tempfile.NamedTemporaryFile(delete=False, suffix=".pkl", dir=".")
-      tmp_res.close()
-
-      p = ctx.Process(target=_compile_unified_resolution_worker,
-                      args=(cam_w, cam_h, args.supercombo_onnx, model_w, model_h, derived_frame_skip, args.benchmark_runs, tmp_res.name))
-      p.start()
-      p.join()
-      if p.exitcode != 0:
-        raise RuntimeError(f"Unified model compilation worker failed for {cam_w}x{cam_h}")
-
-      tmp_files.append((cam_w, cam_h, tmp_res.name))
-    for cam_w, cam_h, tmp_name in tmp_files:
-      with open(tmp_name, "rb") as f:
-        compiled_jit, dev_name = load_oob(f)
+      nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
+      frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
+      make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip,
+                                  frame_copy_size=frame_copy_size)
+      warp = stock.make_warp(nv12, model_w, model_h)
+      run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
+      compiled_jit = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs)
       output_data[(cam_w, cam_h)] = compiled_jit
-      output_data['input_devices']['warp'] = dev_name
-      os.remove(tmp_name)
+      output_data['run_policy'] = compiled_jit
       gc.collect()
+    del model_runner, run_policy
+    gc.collect()
     output_data['metadata']['warp_dev'] = Device.DEFAULT
   else:
     vision_runner = OnnxRunner(args.vision_onnx) if args.vision_onnx else None

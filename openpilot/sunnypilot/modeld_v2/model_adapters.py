@@ -11,7 +11,7 @@ import pickle
 import numpy as np
 
 from openpilot.common.basedir import BASEDIR
-from openpilot.sunnypilot.modeld_v2.compile_modeld import (POLICY_INPUTS, derive_frame_skip, get_policy_npy_shapes,
+from openpilot.sunnypilot.modeld_v2.compile_modeld import (POLICY_INPUTS, derive_frame_skip,
                                                            make_split_input_queues, make_supercombo_input_queues)
 from openpilot.sunnypilot.modeld_v2.stock_dependencies import make_input_queues as stock_make_input_queues, nv12_copy_size
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info

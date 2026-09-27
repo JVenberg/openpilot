@@ -282,44 +282,58 @@ def make_run_policy(vision_runner, policy_runners: list, features_slice: slice, 
   return run_policy
 
 
-def compile_jit(jit, input_keys, make_queues, make_random_inputs=None, benchmark_runs: int = 1, clear_refs=None):
-  SEED = 42
-  def random_inputs_run(fn, seed, n_runs, test_val=None, expect_match=True):
-    queues_res = make_queues(Device.DEFAULT)
-    input_queues, npy = queues_res[0], queues_res[1]
-    frame_views = queues_res[2] if len(queues_res) > 2 else {}
-    rng = np.random.default_rng(seed)
-    Tensor.manual_seed(seed)
+def compile_jit(jit_or_fn, input_keys_or_make_inputs, make_queues=None, make_random_inputs=None, benchmark_runs: int = 1, clear_refs=None):
+  if callable(input_keys_or_make_inputs) and make_queues is None:
+    fn = jit_or_fn
+    make_inputs = input_keys_or_make_inputs
+    jit = TinyJit(fn, prune=True)
 
-    for i in range(n_runs):
-      for v in npy.values():
-        v[:] = rng.standard_normal(v.shape).astype(v.dtype)
-      for v in frame_views.values():
-        v[:] = rng.integers(0, 256, size=v.shape, dtype=np.uint8)
-      Device.default.synchronize()
-      random_inputs = make_random_inputs() if make_random_inputs is not None else {}
-      st = time.perf_counter()
-      outs = fn(**{k: input_queues[k] for k in input_keys if k in input_queues}, **random_inputs)
-      mt = time.perf_counter()
-      Device.default.synchronize()
-      et = time.perf_counter()
-      print(f"  [{i+1}/{n_runs}] enqueue {(mt-st)*1e3:6.2f} ms -- total {(et-st)*1e3:6.2f} ms")
+    def run_eval(f, seed, count):
+      args, kwargs = make_inputs(seed)
+      result = None
+      for i in range(count):
+        Device.default.synchronize()
+        st = time.perf_counter()
+        f(*args, **kwargs)
+        Device.default.synchronize()
+        print(f"  [{i+1}/{count}] {(time.perf_counter()-st)*1e3:.2f} ms")
+        if i == 0:
+          result = [t.numpy().copy() for t in kwargs['output_buffers'].values()]
+      return result
+  else:
+    jit = jit_or_fn
+    input_keys = input_keys_or_make_inputs
+    assert make_queues is not None
+    queues_maker = make_queues
 
-      if i == 0:
-        val = [np.copy(v.numpy()) for v in (outs if isinstance(outs, tuple) else [outs])] if outs is not None else []
+    def run_eval(f, seed, count):
+      queues_res = queues_maker(Device.DEFAULT)
+      input_queues, npy = queues_res[0], queues_res[1]
+      frame_views = queues_res[2] if len(queues_res) > 2 else {}
+      rng = np.random.default_rng(seed)
+      Tensor.manual_seed(seed)
 
-    if test_val is not None:
-      if expect_match:
-        for a, b in zip(val, test_val, strict=True):
-          np.testing.assert_array_equal(a, b, err_msg=f"outputs differ from baseline (seed={seed})")
-      else:
-        match = all(np.array_equal(a, b) for a, b in zip(val, test_val, strict=True))
-        assert not match, f"outputs match baseline unexpectedly (seed={seed})"
-    return val
+      for i in range(count):
+        for v in npy.values():
+          v[:] = rng.standard_normal(v.shape).astype(v.dtype)
+        for v in frame_views.values():
+          v[:] = rng.integers(0, 256, size=v.shape, dtype=np.uint8)
+        Device.default.synchronize()
+        random_inputs = make_random_inputs() if make_random_inputs is not None else {}
+        st = time.perf_counter()
+        outs = f(**{k: input_queues[k] for k in input_keys if k in input_queues}, **random_inputs)
+        mt = time.perf_counter()
+        Device.default.synchronize()
+        et = time.perf_counter()
+        print(f"  [{i+1}/{count}] enqueue {(mt-st)*1e3:6.2f} ms -- total {(et-st)*1e3:6.2f} ms")
+
+        if i == 0:
+          val = [np.copy(v.numpy()) for v in (outs if isinstance(outs, tuple) else [outs])] if outs is not None else []
+      return val
 
   print('capture + replay')
   gc.collect()
-  test_val = random_inputs_run(jit, SEED, 3)
+  test_val = run_eval(jit, 42, 3)
   print(f'pickle round trip ({benchmark_runs} runs per seed)')
   with tempfile.TemporaryFile(dir=".") as f:
     dump_oob(jit, f)
@@ -330,8 +344,11 @@ def compile_jit(jit, input_keys, make_queues, make_random_inputs=None, benchmark
     f.seek(0)
     loaded_jit = load_oob(f)
 
-  random_inputs_run(loaded_jit, SEED, benchmark_runs, test_val, expect_match=True)
-  random_inputs_run(loaded_jit, SEED+1, benchmark_runs, test_val, expect_match=False)
+  for seed in (42, 43):
+    reference = test_val if seed == 42 else run_eval(jit_or_fn, seed, 1)
+    actual = run_eval(loaded_jit, seed, benchmark_runs)
+    for ref, val in zip(reference, actual, strict=True):
+      np.testing.assert_array_equal(ref, val)
   return loaded_jit
 
 
@@ -443,23 +460,30 @@ if __name__ == "__main__":
 
   if is_unified_supercombo:
     output_data['metadata'] = {'model': model_metadata, **model_metadata}
-    features_slice = model_metadata['output_slices']['hidden_state']
-    print(f"Compiling supercombo run_policy JIT (model_size={model_w}x{model_h}, frame_skip={derived_frame_skip})")
-    policy_runner = OnnxRunner(args.supercombo_onnx)
-    run_policy_func = make_run_policy(None, [policy_runner], features_slice, derived_frame_skip, model_metadata['input_shapes'])
-    run_policy_jit = TinyJit(run_policy_func, prune=True)
-    make_policy_queues = partial(generate_queues_and_npy, model_metadata['input_shapes'], derived_frame_skip, is_supercombo=True)
-    WARP_DEV = os.getenv('WARP_DEV', Device.DEFAULT)
-    make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=WARP_DEV)
+    ctx = mp.get_context('spawn')
+    output_data['input_devices'] = {}
+    tmp_files = []
+    for cam_w, cam_h in set(args.camera_resolutions):
+      print(f"Compiling unified model JIT for {cam_w}x{cam_h}")
+      tmp_res = tempfile.NamedTemporaryFile(delete=False, suffix=".pkl", dir=".")
+      tmp_res.close()
 
-    def cleanup_policy():
-      global run_policy_jit, run_policy_func, policy_runner
-      run_policy_jit, run_policy_func, policy_runner = None, None, None
+      p = ctx.Process(target=_compile_unified_resolution_worker,
+                      args=(cam_w, cam_h, args.supercombo_onnx, model_w, model_h, derived_frame_skip, args.benchmark_runs, tmp_res.name))
+      p.start()
+      p.join()
+      if p.exitcode != 0:
+        raise RuntimeError(f"Unified model compilation worker failed for {cam_w}x{cam_h}")
 
-    output_data['run_policy'] = compile_jit(run_policy_jit, POLICY_INPUTS, make_policy_queues, make_random_inputs=make_random_model_inputs,
-                                            benchmark_runs=args.benchmark_runs, clear_refs=cleanup_policy)
-    output_data['input_devices'] = {'model': Device.DEFAULT}
-    output_data['metadata']['warp_dev'] = WARP_DEV
+      tmp_files.append((cam_w, cam_h, tmp_res.name))
+    for cam_w, cam_h, tmp_name in tmp_files:
+      with open(tmp_name, "rb") as f:
+        compiled_jit, dev_name = load_oob(f)
+      output_data[(cam_w, cam_h)] = compiled_jit
+      output_data['input_devices']['warp'] = dev_name
+      os.remove(tmp_name)
+      gc.collect()
+    output_data['metadata']['warp_dev'] = Device.DEFAULT
   else:
     vision_runner = OnnxRunner(args.vision_onnx) if args.vision_onnx else None
 
@@ -484,9 +508,12 @@ if __name__ == "__main__":
     vision_meta = output_data['metadata'].get('vision', {})
 
     derived_frame_skip = args.frame_skip or derive_frame_skip(vision_meta.get('input_shapes', {}), first_policy_meta.get('input_shapes', {}))
-    all_shapes = {key: value for meta in output_data['metadata'].values() for key, value in meta['input_shapes'].items()}
+    all_shapes = {
+      key: value for meta in output_data['metadata'].values()
+      if isinstance(meta, dict) and 'input_shapes' in meta for key, value in meta['input_shapes'].items()
+    }
     feat_meta = output_data['metadata'].get('vision') or output_data['metadata'].get('model') or output_data['metadata'].get('policy')
-    assert feat_meta is not None
+    assert isinstance(feat_meta, dict)
     features_slice = feat_meta['output_slices']['hidden_state']
     is_supercombo = vision_runner is None
     gc.collect()

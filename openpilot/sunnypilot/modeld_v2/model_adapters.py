@@ -180,6 +180,10 @@ class LegacyModelAdapter(BaseModelAdapter):
       self._blob_cache.clear()
 
   def run(self):
+    if (self.cam_w, self.cam_h) in self.jits:
+      if self.chestnut:
+        self.input_device.copy_from(self.input_host)
+      return self.run_warp(**{k: self.input_queues[k] for k in POLICY_INPUTS if k in self.input_queues})
     if self.chestnut:
       self.input_device.copy_from(self.input_host)
       warped = self.run_warp(input_frame=self.device_frames, M_inv=self.device_tfm)

@@ -451,7 +451,6 @@ if __name__ == "__main__":
       run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
       compiled_jit = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs)
       output_data[(cam_w, cam_h)] = compiled_jit
-      output_data['run_policy'] = compiled_jit
       gc.collect()
     del model_runner, run_policy
     gc.collect()

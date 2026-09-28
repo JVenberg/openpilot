@@ -97,7 +97,7 @@ class LegacyModelAdapter(BaseModelAdapter):
           self.input_shapes, self.frame_skip, device=self.QUEUE_DEV, frame_copy_size=self.frame_copy_size)
       else:
         self.input_queues, self.numpy_inputs = make_supercombo_input_queues(self.input_shapes, self.frame_skip, device=self.QUEUE_DEV)
-      self.run_policy = self.jits['run_policy']
+      self.run_policy = self.jits[(self.cam_w, self.cam_h)] if self.chestnut else self.jits['run_policy']
     else:
       self.run_policy = self.jits['run_policy']
       vision_metadata = metadata['vision']

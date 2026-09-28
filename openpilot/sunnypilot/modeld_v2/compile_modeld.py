@@ -11,7 +11,6 @@ import atexit
 import codecs
 import gc
 import math
-import multiprocessing as mp
 import os
 import pickle
 import shutil
@@ -375,24 +374,6 @@ def _load_policy_runners(args: argparse.Namespace) -> tuple[list, list]:
   return runners, keys
 
 
-def _compile_warp_resolution_worker(cam_w, cam_h, model_w, model_h, benchmark_runs, result_path):
-  os.environ['GMMU'] = '0'
-  nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-  WARP_DEV = os.getenv('WARP_DEV', Device.DEFAULT)
-  make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'], shape=nv12.size, device=WARP_DEV)
-  warp = TinyJit(stock.make_warp(nv12, model_w, model_h), prune=True)
-
-  def cleanup_warp():
-    nonlocal warp
-    warp = None
-  compiled_jit = compile_jit(warp, WARP_INPUTS, make_warp_queues, make_random_inputs=make_random_warp_inputs,
-                            benchmark_runs=benchmark_runs, clear_refs=cleanup_warp)
-
-  result_data = (compiled_jit, Device.DEFAULT)
-  with open(result_path, "wb") as f:
-    dump_oob(result_data, f)
-
-
 if __name__ == "__main__":
   if 'USB' in os.getenv('DEV', '') or os.getenv('CHESTNUT'):
     from openpilot.system.hardware.chestnut.flash import link_up
@@ -496,34 +477,20 @@ if __name__ == "__main__":
     WARP_DEV = os.getenv('WARP_DEV', Device.DEFAULT)
     make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=WARP_DEV)
 
-    def cleanup_policy():
-      global run_policy_jit, run_policy_func, vision_runner, policy_runners
-      run_policy_jit, run_policy_func, vision_runner, policy_runners = None, None, None, None
-
     output_data['run_policy'] = compile_jit(run_policy_jit, POLICY_INPUTS, make_policy_queues,
-                                            make_random_inputs=make_random_model_inputs, benchmark_runs=args.benchmark_runs, clear_refs=cleanup_policy)
+                                            make_random_inputs=make_random_model_inputs, benchmark_runs=args.benchmark_runs)
 
-    ctx = mp.get_context('spawn')
     output_data['input_devices'] = {}
-    tmp_files = []
+    WARP_DEV = os.getenv('WARP_DEV', Device.DEFAULT)
     for cam_w, cam_h in set(args.camera_resolutions):
       print(f"Compiling warp JIT for {cam_w}x{cam_h}")
-      tmp_res = tempfile.NamedTemporaryFile(delete=False, suffix=".pkl", dir=".")
-      tmp_res.close()
-
-      p = ctx.Process(target=_compile_warp_resolution_worker, args=(cam_w, cam_h, model_w, model_h, args.benchmark_runs, tmp_res.name))
-      p.start()
-      p.join()
-      if p.exitcode != 0:
-        raise RuntimeError(f"Warp compilation worker failed for {cam_w}x{cam_h}")
-
-      tmp_files.append((cam_w, cam_h, tmp_res.name))
-    for cam_w, cam_h, tmp_name in tmp_files:
-      with open(tmp_name, "rb") as f:
-        compiled_jit, dev_name = load_oob(f)
-      output_data[(cam_w, cam_h)] = compiled_jit
-      output_data['input_devices']['warp'] = dev_name
-      os.remove(tmp_name)
+      nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
+      make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'], shape=nv12.size, device=WARP_DEV)
+      warp = TinyJit(stock.make_warp(nv12, model_w, model_h), prune=True)
+      output_data[(cam_w, cam_h)] = compile_jit(warp, WARP_INPUTS, make_warp_queues,
+                                                make_random_inputs=make_random_warp_inputs,
+                                                benchmark_runs=args.benchmark_runs)
+      output_data['input_devices']['warp'] = Device.DEFAULT
       gc.collect()
     output_data['metadata']['warp_dev'] = Device.DEFAULT
 

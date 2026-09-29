@@ -217,14 +217,39 @@ def hevc_frame_count(path):
   return len(_hevc_index(str(path), path.stat().st_mtime)[1])
 
 
-def hevc_part_ts(path, segment, part):
+@functools.lru_cache(maxsize=256)
+def _qcamera_duration(path, mtime):
+  try:
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path],
+                            capture_output=True, text=True, timeout=5, check=True)
+    duration = float(result.stdout.strip())
+    return duration if math.isfinite(duration) and duration > 0 else None
+  except (OSError, ValueError, subprocess.SubprocessError):
+    return None
+
+
+def connect_segment_duration(route, seg):
+  folder = REALDATA / f"{route}--{seg}"
+  qcamera = folder / "qcamera.ts"
+  if qcamera.is_file():
+    duration = _qcamera_duration(str(qcamera), qcamera.stat().st_mtime)
+    if duration is not None:
+      return duration
+  for name in ("fcamera.hevc", "ecamera.hevc", "dcamera.hevc"):
+    camera = folder / name
+    if camera.is_file():
+      return hevc_frame_count(camera) / 20
+  return 60
+
+
+def hevc_part_ts(path, segment, part, last=False):
   """One 2-second piece of a raw HEVC camera segment as MPEG-TS for hls.js. No re-encode: frames are wrapped as they are,
   one PES per frame, stream setup (VPS/SPS/PPS) repeated at the piece start, timestamps continuing across the whole drive."""
   path = Path(path)
   data, frames, params = _hevc_index(str(path), path.stat().st_mtime)
   first = part * CONNECT_PART_FRAMES
   chunk = frames[first:first + CONNECT_PART_FRAMES]
-  frame_ticks = 90000 * 60 // max(1, len(frames)) if len(frames) >= 1100 else 4500   # full minutes spread exactly; a short last segment runs at 20 fps
+  frame_ticks = 4500 if last or len(frames) < 1100 else 90000 * 60 // max(1, len(frames))   # the final segment ends after its actual frame count
   out, cc = [], {0: 0, 0x1000: 0, 0x100: 0}
 
   def packets(pid, payload, pcr=None, psi=False):
@@ -475,6 +500,7 @@ def connect_routes():
     for segs in info["cams"].values():
       segs.sort()
     info["start"] -= 60   # a segment folder's time is when it finished; each holds a minute
+    info["duration"] = info["segments"][-1] * 60 + connect_segment_duration(info["id"], info["segments"][-1])
   ordered = sorted(routes.values(), key=lambda r: r["start"], reverse=True)
   for info in ordered:   # newest drives get summarised first
     info["summary"] = _route_summary(info)
@@ -493,12 +519,13 @@ def connect_playlist(route, cam="q"):
     if previous is not None and seg != previous + 1:
       lines.append("#EXT-X-DISCONTINUITY")
     if cam == "q":   # low-res is already small: one piece per minute
-      lines += ["#EXTINF:60.0,", f"qcamera?route={route}&seg={seg}&cam={cam}"]
+      seconds = connect_segment_duration(route, seg) if seg == segments[-1] else 60
+      lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}"]
     else:   # full-res: 2 s pieces; only the drive's last (possibly short) minute is counted exactly
       frames = hevc_frame_count(REALDATA / f"{route}--{seg}" / name) if seg == segments[-1] else 1200
       for part in range((frames + CONNECT_PART_FRAMES - 1) // CONNECT_PART_FRAMES):
         seconds = min(CONNECT_PART_FRAMES, frames - part * CONNECT_PART_FRAMES) / 20
-        lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}&part={part}"]
+        lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}&part={part}" + ("&last=1" if seg == segments[-1] else "")]
     previous = seg
   return "\n".join(lines + ["#EXT-X-ENDLIST", ""])
 
@@ -611,7 +638,7 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
         part = query.get("part", ["0"])[0]
         if not part.isdigit():
           return self.send_error(400, "Bad part")
-        body = hevc_part_ts(video, int(segment), int(part))   # full-res cameras: raw HEVC, a 2 s piece repackaged per request
+        body = hevc_part_ts(video, int(segment), int(part), query.get("last", [""])[0] == "1")   # full-res cameras: raw HEVC, a 2 s piece repackaged per request
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
         self.send_header("Cache-Control", "private, max-age=86400")

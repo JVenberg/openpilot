@@ -167,6 +167,7 @@ def _setting_safety_rules():
 
 
 def _setting_engaged():
+  """Treat missing control-state messages as engaged so onroad writes fail closed."""
   sm = messaging.SubMaster(["selfdriveState", "selfdriveStateSP"])
   deadline = time.monotonic() + 0.5
   while not all(sm.seen.values()) and time.monotonic() < deadline:
@@ -628,7 +629,7 @@ def sunnylink_cars():
 
 
 def sunnylink_set_vehicle(name):
-  """Pick a car by its list name, or None to go back to auto-detect. Only with the car off, as on the device."""
+  """Pick a car by its list name, or None for auto-detect, only while offroad."""
   from openpilot.common.params import Params
   params = Params()
   if not params.get_bool("IsOffroad"):
@@ -648,7 +649,7 @@ def sunnylink_set_vehicle(name):
 
 
 def sunnylink_set(key, value):
-  """Write one setting the schema exposes, following Sunnylink's safety rules."""
+  """Write one setting using the driving-state rules in sunnylink's schema."""
   from openpilot.common.params import Params
   from openpilot.sunnypilot.sunnylink.tools.generate_settings_schema import generate_schema
   params = Params()
@@ -870,7 +871,7 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
     path = urlsplit(self.path).path
     if path in ("/sunnylink/param", "/sunnylink/vehicle"):
       origin = self.headers.get("Origin")
-      if origin not in self.server.allowed_origins and urlsplit(origin or "").netloc != self.headers.get("Host"):   # only the app (or a page this server serves) may change car settings
+      if origin not in self.server.allowed_origins and urlsplit(origin or "").netloc != self.headers.get("Host"):   # browser origin filter; non-browser clients can forge Origin
         return self.send_error(403)
       try:
         body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", "0")), 65536)))

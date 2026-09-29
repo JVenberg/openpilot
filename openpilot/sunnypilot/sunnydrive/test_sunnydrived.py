@@ -12,6 +12,24 @@ from openpilot.sunnypilot.sunnydrive.sunnydrived import SunnydriveServer
 
 
 class SunnydriveApiTest(unittest.TestCase):
+  def test_settings_follow_sunnylink_safety_rules(self):
+    with patch("openpilot.common.params.Params") as params_class, patch.object(sunnydrived, "_setting_engaged", return_value=False) as engaged:
+      params_class.return_value.get_bool.return_value = False
+      params_class.return_value.get_type.return_value = 1
+      sunnydrived.sunnylink_set("AlphaLongitudinalEnabled", True)
+      params_class.return_value.put.assert_called_once()
+      with self.assertRaisesRegex(PermissionError, "onroad or engaged"):
+        sunnydrived.sunnylink_set("Mads", True)
+      engaged.return_value = True
+      with self.assertRaisesRegex(PermissionError, "onroad or engaged"):
+        sunnydrived.sunnylink_set("AlphaLongitudinalEnabled", True)
+      params_class.return_value.put.assert_called_once()
+      params_class.return_value.get.return_value = b"1"   # TorqueParamsOverrideEnabled satisfies the schema's onroad alternative
+      params_class.return_value.get_type.return_value = 3
+      sunnydrived.sunnylink_set("TorqueParamsOverrideFriction", 0.1)
+      self.assertEqual(params_class.return_value.put.call_count, 2)
+      params_class.return_value.remove.assert_not_called()
+
   def test_route_list_cache(self):
     with TemporaryDirectory() as folder, patch.object(sunnydrived, "REALDATA", Path(folder)):
       sunnydrived._connect_routes.cache_clear()

@@ -133,6 +133,73 @@ def _sunnylink_walk(node, found):
   return found
 
 
+def _setting_has_rule(rule, kind):
+  if rule.get("type") == kind:
+    return True
+  if rule.get("type") == "not":
+    return _setting_has_rule(rule["condition"], kind)
+  if rule.get("type") in ("any", "all"):
+    return any(_setting_has_rule(child, kind) for child in rule["conditions"])
+  return False
+
+
+@functools.lru_cache(maxsize=1)
+def _setting_safety_rules():
+  from openpilot.sunnypilot.sunnylink.tools.generate_settings_schema import generate_schema
+  rules_by_key = {}
+
+  def collect(node, inherited=()):
+    if isinstance(node, list):
+      for child in node:
+        collect(child, inherited)
+    elif isinstance(node, dict):
+      rules = (*inherited, *(node.get("enablement") or []))
+      if node.get("key") and node.get("widget"):
+        safety = [rule for rule in rules if _setting_has_rule(rule, "offroad_only") or _setting_has_rule(rule, "not_engaged")]
+        if safety:
+          rules_by_key.setdefault(node["key"], []).append(safety)
+      for name, child in node.items():
+        if name not in ("enablement", "visibility", "options"):
+          collect(child, rules)
+
+  collect(generate_schema())
+  return rules_by_key
+
+
+def _setting_engaged():
+  sm = messaging.SubMaster(["selfdriveState", "selfdriveStateSP"])
+  deadline = time.monotonic() + 0.5
+  while not all(sm.seen.values()) and time.monotonic() < deadline:
+    sm.update(50)
+  return not all(sm.seen.values()) or sm["selfdriveState"].enabled or sm["selfdriveStateSP"].mads.enabled
+
+
+def _setting_rule_allows(rule, offroad, engaged, params):
+  kind = rule.get("type")
+  if kind == "offroad_only":
+    return offroad
+  if kind == "not_engaged":
+    return offroad or engaged is False
+  if kind == "param":
+    try:
+      value = params.get(rule["key"], return_default=True)
+      if isinstance(value, bytes):
+        value = value.decode()
+      expected = rule.get("equals")
+      if isinstance(expected, bool):
+        return (value is True or str(value).lower() in ("1", "true")) == expected
+      return str(value) == str(expected)
+    except Exception:
+      return False
+  if kind == "any":
+    return any(_setting_rule_allows(child, offroad, engaged, params) for child in rule["conditions"])
+  if kind == "all":
+    return all(_setting_rule_allows(child, offroad, engaged, params) for child in rule["conditions"])
+  if kind == "not":
+    return not _setting_rule_allows(rule["condition"], offroad, engaged, params)
+  return False
+
+
 def _json_value(value):
   return value.decode("utf-8", "ignore") if isinstance(value, bytes) else value
 
@@ -581,15 +648,18 @@ def sunnylink_set_vehicle(name):
 
 
 def sunnylink_set(key, value):
-  """Write one setting the schema exposes; offroad-only settings are refused while driving."""
+  """Write one setting the schema exposes, following Sunnylink's safety rules."""
   from openpilot.common.params import Params
   from openpilot.sunnypilot.sunnylink.tools.generate_settings_schema import generate_schema
   params = Params()
   item = _sunnylink_walk(generate_schema(), {"items": {}, "keys": set()})["items"].get(key)
   if item is None or item.get("widget") not in SUNNYLINK_WIDGETS or item.get("readonly") or item.get("blocked"):   # blocked = device-only (e.g. SSH/ADB)
     raise PermissionError("not a changeable setting")
-  if any(rule.get("type") == "offroad_only" for rule in item.get("enablement") or []) and not params.get_bool("IsOffroad"):
-    raise PermissionError("only while the car is off")
+  offroad = params.get_bool("IsOffroad")
+  item_rules = _setting_safety_rules().get(key, [])
+  is_engaged = _setting_engaged() if not offroad and any(_setting_has_rule(rule, "not_engaged") for rules in item_rules for rule in rules) else None
+  if any(not all(_setting_rule_allows(rule, offroad, is_engaged, params) for rule in rules) for rules in item_rules):
+    raise PermissionError("setting unavailable while onroad or engaged")
   if value in ("", None):
     params.remove(key)
   else:

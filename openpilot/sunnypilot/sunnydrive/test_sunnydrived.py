@@ -1,13 +1,27 @@
 import json
 import threading
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from openpilot.sunnypilot.sunnydrive import sunnydrived
 from openpilot.sunnypilot.sunnydrive.sunnydrived import SunnydriveServer
 
 
 class SunnydriveApiTest(unittest.TestCase):
+  def test_route_list_cache(self):
+    with TemporaryDirectory() as folder, patch.object(sunnydrived, "REALDATA", Path(folder)):
+      sunnydrived._connect_routes.cache_clear()
+      try:
+        self.assertEqual(sunnydrived.connect_routes(), [])
+        self.assertEqual(sunnydrived.connect_routes(), [])
+        self.assertEqual(sunnydrived._connect_routes.cache_info().hits, 1)
+      finally:
+        sunnydrived._connect_routes.cache_clear()
+
   def test_api_only(self):
     server = SunnydriveServer(("127.0.0.1", 0))
     server.publish_telemetry({"timestampMs": 123})

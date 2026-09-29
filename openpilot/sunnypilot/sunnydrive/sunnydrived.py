@@ -485,6 +485,12 @@ def phone_alerts():
 
 def connect_routes():
   """Drives stored on this device, newest first: segments on disk and when they were recorded."""
+  return _connect_routes(int(time.monotonic() // 3))
+
+
+@functools.lru_cache(maxsize=1)
+def _connect_routes(_tick):
+  # ponytail: drive list can lag disk by three seconds; use filesystem events if instant updates become necessary.
   routes = {}
   for entry in REALDATA.iterdir() if REALDATA.is_dir() else []:
     route, _, segment = entry.name.rpartition("--")

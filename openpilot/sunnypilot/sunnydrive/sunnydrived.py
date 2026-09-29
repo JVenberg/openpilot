@@ -603,7 +603,17 @@ class SunnydriveServer(ThreadingHTTPServer):
     # The Android apps bundle the WUI and request these APIs across origins.
     self.allowed_origins = {"https://ai.sunnypilot.sunnydrive", "https://ai.sunnypilot.sunnydrive.parked", "http://localhost:8766", "http://127.0.0.1:8766"} | ({allowed_origin} if allowed_origin else set())
     self.llm_upstream = llm_upstream.rstrip("/")
-    self.telemetry = {"timestampMs": 0, "car": None, "selfdrive": None, "mads": None, "lateral": None, "gps": None, "device": None, "vehicle": None, "model": None, "driverMonitoring": None}
+    self.telemetry_changed = threading.Condition()
+    self.telemetry_version = 0
+    self.publish_telemetry({"timestampMs": 0, "car": None, "selfdrive": None, "mads": None, "lateral": None, "gps": None, "device": None, "vehicle": None, "model": None, "driverMonitoring": None})
+
+  def publish_telemetry(self, sample):
+    event = b"data: " + json.dumps(compact(sample), allow_nan=False, separators=(",", ":")).encode() + b"\n\n"
+    with self.telemetry_changed:
+      self.telemetry = sample
+      self.telemetry_event = event
+      self.telemetry_version += 1
+      self.telemetry_changed.notify_all()
 
 
 class SunnydriveHandler(BaseHTTPRequestHandler):
@@ -696,20 +706,19 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
       if self.headers.get("Origin") in self.server.allowed_origins:
         self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin"))
       self.end_headers()
-      last, idle = None, time.monotonic()
+      version = -1
       try:
         while True:
-          sample = self.server.telemetry
-          if sample is not last:
-            event = b"data: " + json.dumps(compact(sample), allow_nan=False, separators=(",", ":")).encode() + b"\n\n"
-            self.wfile.write(gz.compress(event) + gz.flush(zlib.Z_SYNC_FLUSH) if gz else event)
-            self.wfile.flush()
-            last, idle = sample, time.monotonic()
-          elif time.monotonic() - idle > 15:
-            self.wfile.write(gz.compress(b": keepalive\n\n") + gz.flush(zlib.Z_SYNC_FLUSH) if gz else b": keepalive\n\n")   # proxies (tailscale serve) keep idle streams open
-            self.wfile.flush()
-            idle = time.monotonic()
-          time.sleep(0.02)
+          with self.server.telemetry_changed:
+            self.server.telemetry_changed.wait_for(lambda: self.server.telemetry_version != version, timeout=15)
+            changed = self.server.telemetry_version != version
+            if changed:
+              version = self.server.telemetry_version
+              event = self.server.telemetry_event
+            else:
+              event = b": keepalive\n\n"   # proxies (tailscale serve) keep idle streams open
+          self.wfile.write(gz.compress(event) + gz.flush(zlib.Z_SYNC_FLUSH) if gz else event)
+          self.wfile.flush()
       except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
         return
     if path != "/telemetry":
@@ -842,7 +851,7 @@ def sample_loop(server):
   while True:
     start = time.monotonic()
     sm.update(50)
-    server.telemetry = snapshot(sm)   # 20 Hz, the road model's own rate; streamed to the car screen as it changes
+    server.publish_telemetry(snapshot(sm))   # 20 Hz, the road model's own rate; streamed to the car screen as it changes
     time.sleep(max(0.0, 0.05 - (time.monotonic() - start)))   # new messages wake update() early: hold the rate
 
 

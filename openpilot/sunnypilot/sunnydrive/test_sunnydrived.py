@@ -10,7 +10,7 @@ from openpilot.sunnypilot.sunnydrive.sunnydrived import SunnydriveServer
 class SunnydriveApiTest(unittest.TestCase):
   def test_api_only(self):
     server = SunnydriveServer(("127.0.0.1", 0))
-    server.telemetry = {"timestampMs": 123}
+    server.publish_telemetry({"timestampMs": 123})
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -19,6 +19,14 @@ class SunnydriveApiTest(unittest.TestCase):
       with urlopen(request, timeout=2) as response:
         self.assertEqual(json.load(response), server.telemetry)
         self.assertEqual(response.headers["Access-Control-Allow-Origin"], "https://ai.sunnypilot.sunnydrive")
+      with urlopen(base + "/telemetry/stream", timeout=2) as first, urlopen(base + "/telemetry/stream", timeout=2) as second:
+        self.assertEqual(first.readline(), b'data: {"timestampMs":123}\n')
+        self.assertEqual(second.readline(), b'data: {"timestampMs":123}\n')
+        first.readline()
+        second.readline()
+        server.publish_telemetry({"timestampMs": 456})
+        self.assertEqual(first.readline(), b'data: {"timestampMs":456}\n')
+        self.assertEqual(second.readline(), b'data: {"timestampMs":456}\n')
       for path in ("/", "/index.html", "/replay", "/youtube-playlists"):
         with self.assertRaises(HTTPError) as error:
           urlopen(base + path, timeout=2)

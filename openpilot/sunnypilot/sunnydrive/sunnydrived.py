@@ -219,13 +219,25 @@ def hevc_frame_count(path):
 
 @functools.lru_cache(maxsize=256)
 def _qcamera_duration(path, mtime):
-  try:
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path],
-                            capture_output=True, text=True, timeout=5, check=True)
-    duration = float(result.stdout.strip())
-    return duration if math.isfinite(duration) and duration > 0 else None
-  except (OSError, ValueError, subprocess.SubprocessError):
-    return None
+  def timestamps(data):
+    for i in range(0, len(data) - 187, 188):
+      packet = data[i:i + 188]
+      if packet[0] != 0x47 or not packet[1] & 0x40 or not packet[3] & 0x10:
+        continue
+      start = 4 + (1 + packet[4] if packet[3] & 0x20 else 0)
+      if start + 14 > 188:
+        continue
+      if packet[start:start + 3] != b"\0\0\1" or not 0xE0 <= packet[start + 3] <= 0xEF or not packet[start + 7] & 0x80:
+        continue
+      p = packet[start + 9:start + 14]
+      if len(p) == 5:
+        yield ((p[0] & 0x0E) << 29) | (p[1] << 22) | ((p[2] & 0xFE) << 14) | (p[3] << 7) | (p[4] >> 1)
+
+  with open(path, "rb") as file:
+    first = next(timestamps(file.read(188 * 500)), None)
+    file.seek(max(0, (Path(path).stat().st_size - 188 * 500) // 188 * 188))
+    last = next(reversed(list(timestamps(file.read()))), None)
+  return ((last - first) % (1 << 33)) / 90000 + .05 if first is not None and last is not None else None
 
 
 def connect_segment_duration(route, seg):

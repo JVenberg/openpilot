@@ -1,31 +1,33 @@
 """Serve Sunnydrive telemetry and comma-side APIs to the phone app."""
 
 import argparse
-import concurrent.futures
 import functools
 import json
 import zlib
 import math
 import os
 import re
-import subprocess
+import socket
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from openpilot.cereal import messaging  # noqa: E402
+from openpilot.sunnypilot.sunnydrive import pairing  # noqa: E402
 
 SERVICES = ["carState", "selfdriveState", "selfdriveStateSP", "carControl", "gpsLocationExternal", "deviceState", "carParams", "modelV2", "driverMonitoringState"]
 LLM_GET = {"/v1/models", "/api/v0/models"}
 LLM_POST = {"/v1/chat/completions"}
 SUNNYLINK_WIDGETS = {"toggle", "option", "multiple_button"}   # the setting kinds the app can change
+DISCOVERY_PORT = 53134
+DISCOVERY_PREFIX = b"SUNNYDRIVE1 "
 
 
 def fresh(sm, service, seconds=3):
@@ -493,46 +495,6 @@ threading.Thread(target=_summary_worker, daemon=True, name="connect-summaries").
 _segment_files, _summaries = {}, {}   # per-folder file list/size, and per-minute summaries, kept once read
 
 
-def tailscale_peers():
-  """Devices on this machine's tailnet, for the phone setup screen's server pickers. Empty when tailscale isn't here."""
-  import glob, shutil
-  cli = shutil.which("tailscale") or next(iter(sorted(glob.glob("/data/tailscale_*/tailscale"))), None) or next((p for p in ("/Applications/Tailscale.app/Contents/MacOS/Tailscale",) if os.path.exists(p)), None)
-  if not cli:
-    return []
-  sock = "/data/tailscale/socket/tailscaled.sock"   # the comma runs its own tailscaled
-  try:
-    out = subprocess.run([cli, *([f"--socket={sock}"] if os.path.exists(sock) else []), "status", "--json"], capture_output=True, timeout=5, check=True).stdout
-    status = json.loads(out)
-  except (OSError, subprocess.SubprocessError, ValueError):
-    return []
-  peers = [dict(node, self=True) for node in [status.get("Self") or {}]] + list((status.get("Peer") or {}).values())
-  found = [{"name": n.get("HostName", ""), "dns": n.get("DNSName", "").rstrip("."), "os": n.get("OS", ""), "online": bool(n.get("Online") or n.get("self")), "self": bool(n.get("self"))} for n in peers if n.get("DNSName")]
-  return sorted(found, key=lambda n: (not n["online"], n["dns"]))
-
-
-_llm_found = {"url": "", "at": 0.0}
-
-
-def find_llm():
-  """The first online tailnet device with LM Studio on its usual port. A hit is kept; a miss is retried after a minute."""
-  if _llm_found["url"] or time.monotonic() - _llm_found["at"] < 60:
-    return _llm_found["url"]
-  _llm_found["at"] = time.monotonic()
-
-  def probe(peer):
-    url = f"http://{peer['dns']}:1234"
-    try:
-      with urlopen(url + "/v1/models", timeout=2) as response:
-        return url if response.status == 200 else ""
-    except (OSError, ValueError):
-      return ""
-
-  peers = [p for p in tailscale_peers() if p["online"] and not p["self"]]
-  with concurrent.futures.ThreadPoolExecutor(8) as pool:
-    _llm_found["url"] = next((url for url in pool.map(probe, peers) if url), "")
-  return _llm_found["url"]
-
-
 def phone_alerts():
   """What the phone app notifies about: each drive once it's fully summarised, and critical alerts during it. Newest first; ids are stable."""
   events = []
@@ -593,7 +555,7 @@ def _connect_routes(_tick):
   return ordered
 
 
-def connect_playlist(route, cam="q"):
+def connect_playlist(route, cam="q", auth=""):
   """HLS playlist of one camera's segments for a drive; missing minutes become discontinuities."""
   name = CONNECT_CAMERAS[cam]
   segments = sorted(int(p.name.rpartition("--")[2]) for p in REALDATA.glob(f"{route}--*") if p.name.rpartition("--")[2].isdigit() and (p / name).is_file())
@@ -606,12 +568,13 @@ def connect_playlist(route, cam="q"):
       lines.append("#EXT-X-DISCONTINUITY")
     if cam == "q":   # low-res is already small: one piece per minute
       seconds = connect_segment_duration(route, seg) if seg == segments[-1] else 60
-      lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}"]
+      lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}" + (f"&auth={quote(auth)}" if auth else "")]
     else:   # full-res: 2 s pieces; only the drive's last (possibly short) minute is counted exactly
       frames = hevc_frame_count(REALDATA / f"{route}--{seg}" / name) if seg == segments[-1] else 1200
       for part in range((frames + CONNECT_PART_FRAMES - 1) // CONNECT_PART_FRAMES):
         seconds = min(CONNECT_PART_FRAMES, frames - part * CONNECT_PART_FRAMES) / 20
-        lines += [f"#EXTINF:{seconds:.2f},", f"qcamera?route={route}&seg={seg}&cam={cam}&part={part}" + ("&last=1" if seg == segments[-1] else "")]
+        path = f"qcamera?route={route}&seg={seg}&cam={cam}&part={part}" + ("&last=1" if seg == segments[-1] else "")
+        lines += [f"#EXTINF:{seconds:.2f},", path + (f"&auth={quote(auth)}" if auth else "")]
     previous = seg
   return "\n".join(lines + ["#EXT-X-ENDLIST", ""])
 
@@ -675,11 +638,12 @@ def sunnylink_set(key, value):
 class SunnydriveServer(ThreadingHTTPServer):
   daemon_threads = True
 
-  def __init__(self, address, allowed_origin=None, llm_upstream=""):
+  def __init__(self, address, allowed_origin=None, llm_upstream="", allow_loopback=True):
     super().__init__(address, SunnydriveHandler)
     # The Android apps bundle the WUI and request these APIs across origins.
     self.allowed_origins = {"https://ai.sunnypilot.sunnydrive", "https://ai.sunnypilot.sunnydrive.parked", "http://localhost:8766", "http://127.0.0.1:8766"} | ({allowed_origin} if allowed_origin else set())
     self.llm_upstream = llm_upstream.rstrip("/")
+    self.allow_loopback = allow_loopback
     self.telemetry_changed = threading.Condition()
     self.telemetry_version = 0
     self.publish_telemetry({"timestampMs": 0, "car": None, "selfdrive": None, "mads": None, "lateral": None, "gps": None, "device": None, "vehicle": None, "model": None, "driverMonitoring": None})
@@ -694,6 +658,9 @@ class SunnydriveServer(ThreadingHTTPServer):
 
 
 class SunnydriveHandler(BaseHTTPRequestHandler):
+  def log_message(self, _format, *_args):
+    pass   # authenticated media URLs carry a token in the query; never put it in logs
+
   def send_header(self, keyword, value):
     if keyword.lower() == "access-control-allow-origin":
       self._cors_sent = True
@@ -710,6 +677,14 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
   def do_GET(self):
     parsed = urlsplit(self.path)
     path = parsed.path
+    query = parse_qs(parsed.query)
+    if path == "/pair/info":
+      client_id = query.get("client_id", [""])[0]
+      return self.send_json({"deviceId": pairing.device_id(), "name": pairing.device_name(), "apiVersion": 1, "paired": pairing.is_paired(client_id)})
+    if path == "/pair/status":
+      return self.send_json(pairing.consume_request(query.get("request", [""])[0]))
+    if not self.authorized(query):
+      return self.send_error(401, "Pair this phone first")
     if path == "/connect/routes":
       try:
         from openpilot.common.params import Params
@@ -719,10 +694,7 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
       return self.send_json({"routes": connect_routes(), "offroad": offroad})
     if path == "/alerts":
       return self.send_json({"alerts": phone_alerts()})
-    if path == "/tailscale/peers":
-      return self.send_json({"peers": tailscale_peers()})
     if path in ("/connect/playlist.m3u8", "/connect/qcamera"):
-      query = parse_qs(parsed.query)
       route = query.get("route", [""])[0]
       cam = query.get("cam", ["q"])[0]
       if not CONNECT_ROUTE.fullmatch(route) or cam not in CONNECT_CAMERAS:
@@ -749,7 +721,7 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
           pass
         return
       try:
-        body = connect_playlist(route, cam).encode()
+        body = connect_playlist(route, cam, query.get("auth", [""])[0]).encode()
       except FileNotFoundError:
         return self.send_error(404, "No video for that route")
       self.send_response(200)
@@ -857,18 +829,35 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
       pass
 
   def do_OPTIONS(self):
-    # CORS preflight for the assistant's JSON POST from the app origins
-    if self.headers.get("Origin") not in self.server.allowed_origins or urlsplit(self.path).path not in LLM_GET | LLM_POST | {"/sunnylink/param", "/sunnylink/vehicle"}:
+    if self.headers.get("Origin") not in self.server.allowed_origins:
       return self.send_error(403)
     self.send_response(204)
     self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin"))
     self.send_header("Access-Control-Allow-Methods", "GET, POST")
-    self.send_header("Access-Control-Allow-Headers", "Content-Type")
+    self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
     self.send_header("Access-Control-Max-Age", "600")
     self.end_headers()
 
   def do_POST(self):
     path = urlsplit(self.path).path
+    if path in ("/pair/request", "/pair/complete"):
+      try:
+        body = self.read_json()
+        if path == "/pair/request":
+          return self.send_json({"request": pairing.request_pairing(str(body["clientId"]), body.get("name"))})
+        return self.send_json({"token": pairing.complete_pairing(str(body["clientId"]), body.get("name"), str(body["proof"]))})
+      except PermissionError as error:
+        return self.send_error(403, str(error))
+      except (ValueError, KeyError, TypeError) as error:
+        return self.send_error(400, str(error))
+    if not self.authorized(parse_qs(urlsplit(self.path).query)):
+      return self.send_error(401, "Pair this phone first")
+    if path == "/pair/unpair":
+      try:
+        body = self.read_json()
+        return self.send_json({"removed": pairing.unpair(str(body["clientId"]))})
+      except (ValueError, KeyError, TypeError) as error:
+        return self.send_error(400, str(error))
     if path in ("/sunnylink/param", "/sunnylink/vehicle"):
       origin = self.headers.get("Origin")
       if origin not in self.server.allowed_origins and urlsplit(origin or "").netloc != self.headers.get("Host"):   # browser origin filter; non-browser clients can forge Origin
@@ -893,9 +882,9 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
     self.proxy_llm(path, self.rfile.read(length))
 
   def proxy_llm(self, path, body=None):
-    upstream = self.server.llm_upstream or find_llm()
+    upstream = self.server.llm_upstream
     if not upstream:
-      return self.send_error(502, "No LM Studio found on the tailnet")
+      return self.send_error(502, "No model server configured")
     request = Request(upstream + path, data=body,
                       headers={"Content-Type": "application/json"} if body is not None else {},
                       method="POST" if body is not None else "GET")
@@ -915,12 +904,55 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(result)
 
+  def read_json(self):
+    length = int(self.headers.get("Content-Length", "0"))
+    if length <= 0 or length > 65536:
+      raise ValueError("invalid request size")
+    return json.loads(self.rfile.read(length))
+
+  def authorized(self, query):
+    if self.server.allow_loopback and self.client_address[0] in ("127.0.0.1", "::1"):
+      return True
+    header = self.headers.get("Authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else query.get("auth", [""])[0]
+    return pairing.authorized(token)
+
 
 def compact(sample):
   """Road model numbers to centimetres for the stream (17-digit floats were ~80% of every sample); GPS stays exact."""
   def r(v):
     return round(v, 2) if isinstance(v, float) else [r(x) for x in v] if isinstance(v, list) else {k: r(x) for k, x in v.items()} if isinstance(v, dict) else v
   return {**sample, "model": r(sample["model"])} if isinstance(sample, dict) and sample.get("model") else sample
+
+
+def discovery_response(packet, http_port=8766):
+  """Return a small discovery reply, or None for malformed/foreign datagrams."""
+  if not packet.startswith(DISCOVERY_PREFIX) or len(packet) > 1024:
+    return None
+  try:
+    request = json.loads(packet[len(DISCOVERY_PREFIX):])
+    nonce, client_id = str(request["nonce"]), str(request.get("clientId", ""))
+  except (ValueError, KeyError, TypeError):
+    return None
+  if request.get("v") != 1 or not 8 <= len(nonce) <= 128:
+    return None
+  body = {"v": 1, "nonce": nonce, "deviceId": pairing.device_id(), "name": pairing.device_name(),
+          "httpPort": http_port, "apiVersion": 1, "paired": pairing.is_paired(client_id)}
+  return DISCOVERY_PREFIX + json.dumps(body, separators=(",", ":")).encode()
+
+
+def discovery_loop(http_port=8766, udp_port=DISCOVERY_PORT):
+  with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", udp_port))
+    while True:
+      try:
+        packet, sender = sock.recvfrom(1024)
+        reply = discovery_response(packet, http_port)
+        if reply:
+          sock.sendto(reply, sender)
+      except OSError:
+        time.sleep(1)
 
 
 def sample_loop(server):
@@ -937,11 +969,12 @@ def main():
   parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: all interfaces for iPad access)")
   parser.add_argument("--port", type=int, default=8766)
   parser.add_argument("--allow-origin", help="Optional exact origin for a separately hosted WUI")
-  parser.add_argument("--llm-upstream", default=os.environ.get("SUNNYDRIVE_LLM", ""), help="LM Studio URL reachable from the comma (default: the first tailnet device answering on :1234)")
+  parser.add_argument("--llm-upstream", default=os.environ.get("SUNNYDRIVE_LLM", ""), help="Optional OpenAI-compatible model server URL")
   args = parser.parse_args()
   os.nice(10)
   server = SunnydriveServer((args.host, args.port), args.allow_origin, args.llm_upstream)
   threading.Thread(target=sample_loop, args=(server,), daemon=True).start()
+  threading.Thread(target=discovery_loop, args=(args.port,), daemon=True, name="sunnydrive-discovery").start()
   print(f"Sunnydrive API: http://{args.host}:{args.port}/", flush=True)
   server.serve_forever()
 

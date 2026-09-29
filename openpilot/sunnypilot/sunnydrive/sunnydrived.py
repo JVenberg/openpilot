@@ -281,10 +281,10 @@ CONNECT_SPANS = ("engaged", "long", "lat", "override", "prompt", "critical", "bo
 
 
 def summarize_segment(route, seg):
-  """One minute's qlog boiled down for the drives list: timeline spans, distance, first/last GPS, the thumbnail.
+  """One minute's qlog boiled down for the drives list: timeline spans, distance, first/last GPS.
   Spans follow comma connect (engaged/override/alerts/bookmarks) plus sunnypilot's MADS lat-only and long-only."""
   from openpilot.tools.lib.logreader import LogReader
-  samples, bookmarks, gps, meters, t0, last, lat_active, mads, thumb, alerts = [], [], [], 0.0, None, None, False, None, None, []
+  samples, bookmarks, gps, meters, t0, last, lat_active, mads, alerts = [], [], [], 0.0, None, None, False, None, []
   for m in LogReader(str(REALDATA / f"{route}--{seg}" / "qlog.zst")):
     t = m.logMonoTime / 1e9
     kind = m.which()
@@ -315,8 +315,6 @@ def summarize_segment(route, seg):
       last = t
     elif kind == "gpsLocationExternal" and m.gpsLocationExternal.hasFix:
       gps.append((m.gpsLocationExternal.latitude, m.gpsLocationExternal.longitude))
-    elif kind == "thumbnail" and thumb is None:
-      thumb = bytes(m.thumbnail.thumbnail)
 
   spans = {}
   for name in CONNECT_SPANS[:-1]:
@@ -329,9 +327,7 @@ def summarize_segment(route, seg):
         start = None
     spans[name] = out
   spans["bookmark"] = [[b, b + 1] for b in bookmarks]
-  if thumb:
-    (CONNECT_CACHE / f"{route}--{seg}.jpg").write_bytes(thumb)
-  return {"spans": spans, "meters": round(meters), "start": gps[0] if gps else None, "end": gps[-1] if gps else None, "thumb": bool(thumb), "alerts": alerts}
+  return {"spans": spans, "meters": round(meters), "start": gps[0] if gps else None, "end": gps[-1] if gps else None, "alerts": alerts}
 
 
 def _summary_worker():
@@ -365,7 +361,7 @@ def _summary_worker():
 def _route_summary(info):
   """A drive's timeline from its cached minutes; queues the minutes still missing."""
   CONNECT_CACHE.mkdir(parents=True, exist_ok=True)
-  spans, meters, start, end, thumbs, done, alerts = {name: [] for name in CONNECT_SPANS}, 0, None, None, [], 0, []
+  spans, meters, start, end, done, alerts = {name: [] for name in CONNECT_SPANS}, 0, None, None, 0, []
   for seg in info["segments"]:
     target = CONNECT_CACHE / f"{info['id']}--{seg}.json"
     try:
@@ -381,11 +377,9 @@ def _route_summary(info):
     alerts += [[seg * 60 + a[0], *a[1:]] for a in s.get("alerts", [])]
     start = start or s.get("start")
     end = s.get("end") or end
-    if s.get("thumb"):
-      thumbs.append(seg)
   if _summary_queue:
     _summary_busy.set()
-  return {"done": done, "spans": spans, "meters": meters, "startGps": start, "endGps": end, "thumbs": thumbs, "alerts": alerts}
+  return {"done": done, "spans": spans, "meters": meters, "startGps": start, "endGps": end, "alerts": alerts}
 
 
 threading.Thread(target=_summary_worker, daemon=True, name="connect-summaries").start()
@@ -601,19 +595,6 @@ class SunnydriveHandler(BaseHTTPRequestHandler):
       return self.send_json({"alerts": phone_alerts()})
     if path == "/tailscale/peers":
       return self.send_json({"peers": tailscale_peers()})
-    if path == "/connect/thumb":
-      query = parse_qs(parsed.query)
-      route, seg = query.get("route", [""])[0], query.get("seg", [""])[0]
-      thumb = CONNECT_CACHE / f"{route}--{seg}.jpg"
-      if not CONNECT_ROUTE.fullmatch(route) or not seg.isdigit() or not thumb.is_file():
-        return self.send_error(404, "No thumbnail")
-      body = thumb.read_bytes()
-      self.send_response(200)
-      self.send_header("Content-Type", "image/jpeg")
-      self.send_header("Cache-Control", "private, max-age=604800")
-      self.send_header("Content-Length", str(len(body)))
-      self.end_headers()
-      return self.wfile.write(body)
     if path in ("/connect/playlist.m3u8", "/connect/qcamera"):
       query = parse_qs(parsed.query)
       route = query.get("route", [""])[0]

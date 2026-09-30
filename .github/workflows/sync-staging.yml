@@ -7,11 +7,14 @@ on:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm  # prebuilt .so files are aarch64
     permissions:
       contents: write
     steps:
       - uses: astral-sh/setup-uv@v6
+
+      - name: Install sim libraries
+        run: sudo apt-get install -y -qq libzmq5 libgomp1
 
       - name: Rebase onto latest upstream staging
         id: rebase
@@ -37,10 +40,14 @@ jobs:
             git cherry-pick "$BASE..origin/staging-launch"
             echo "push=true" >> "$GITHUB_OUTPUT"
           fi
+          git worktree add -q ../stock "$UPSTREAM"
           echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
 
       - name: Run launch-fix tests
         run: repo/jvenberg/tests/run.sh
+
+      - name: Run launch sim against stock staging
+        run: repo/jvenberg/sim/run.sh stock
 
       - name: Push
         if: steps.rebase.outputs.push == 'true'

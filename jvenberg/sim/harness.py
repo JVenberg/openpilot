@@ -27,7 +27,8 @@ CAR_MODEL = CAR.TOYOTA_RAV4_PRIME
 PLANNER_EVERY = round(DT_MDL / DT_CTRL)
 PCM_DELAY = 0.05  # s, hybrid
 PCM_TAU = 0.3  # s
-BRAKE_HOLD_RELEASE = 0.8  # s from PERMIT_BRAKING clearing to rolling, measured on a 2021 RAV4 Prime
+LAUNCH_CMD = 0.3  # m/s^2
+LAUNCH_LAG = 0.8  # s from sent accel >= LAUNCH_CMD to wheels turning, measured on a 2021 RAV4 Prime
 
 
 @dataclass
@@ -65,7 +66,7 @@ class Sim:
 
     self.x = self.v = self.a = 0.
     self.a_target, self.should_stop = 0., False
-    self.t, self.hold_released_at = 0., None
+    self.t, self.launch_cmd_at = 0., None
     self.pcm_hist = deque([0.] * max(1, round(PCM_DELAY / DT_CTRL)))
     self.radar_hist = deque(maxlen=max(1, round(sc.radar_delay / DT_MDL)) + 1)
     self.lead = Lead(x=sc.initial_gap if sc.initial_gap is not None else 60.)
@@ -142,12 +143,12 @@ class Sim:
     self.pcm_hist.append(pcm_cmd)
     cmd = self.pcm_hist.popleft()
     if self.v <= 0.:
-      if permit_braking or cmd <= 0.:
-        self.hold_released_at = None
-      elif self.hold_released_at is None:
-        self.hold_released_at = self.t
-      if self.hold_released_at is None or self.t - self.hold_released_at < BRAKE_HOLD_RELEASE:
-        self.v, self.a = 0., 0.  # brake hold at standstill
+      if cmd < LAUNCH_CMD:
+        self.launch_cmd_at = None
+      elif self.launch_cmd_at is None:
+        self.launch_cmd_at = self.t
+      if self.launch_cmd_at is None or self.t - self.launch_cmd_at < LAUNCH_LAG:
+        self.v, self.a = 0., 0.
         return
     self.a += (cmd - self.a) * DT_CTRL / PCM_TAU
     self.v = max(0., self.v + self.a * DT_CTRL)

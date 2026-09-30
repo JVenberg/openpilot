@@ -8,13 +8,14 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Rebase and push
         env:
-          TOKEN: ${{ secrets.SYNC_PAT }}
+          TOKEN: ${{ secrets.SYNC_PAT || github.token }}
         run: |
           set -euo pipefail
-          if [ -z "$TOKEN" ]; then echo "::error::Add a SYNC_PAT secret (fine-grained PAT, Contents + Workflows read/write on this repo)"; exit 1; fi
           git init -q repo && cd repo
           git config user.name "fork-sync"
           git config user.email "fork-sync@users.noreply.github.com"

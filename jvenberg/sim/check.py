@@ -21,7 +21,7 @@ MAX_EXTRA_DECEL = 1.0  # m/s^2
 MIN_LAUNCH_SPEEDUP = 0.3  # s
 
 NORMAL_LAUNCH = "normal launch (lead 1.5 m/s2)"
-NORMAL_LAUNCH_MAX_T = 2.4  # s, includes the ~0.8 s brake hold release
+NORMAL_LAUNCH_MAX_T = 2.4  # s, includes the car's ~0.8 s launch lag
 LAUNCHES = {NORMAL_LAUNCH, "gentle lead (0.7 m/s2)", "aggressive lead (3.0 m/s2)", "relaxed personality",
             "aggressive personality", "radar delay 0.3s", "experimental mode, normal launch", "close start (3m) then lead goes"}
 FALSE_STARTS = {"radar noise+spikes, lead never moves", "big radar spikes (2 m/s), lead never moves",

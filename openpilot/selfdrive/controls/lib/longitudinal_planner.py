@@ -37,7 +37,7 @@ _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
 def get_launch_assist_accel(lead, v_ego, personality):
-  if not (lead.status and math.isfinite(lead.dRel) and math.isfinite(lead.vLead) and math.isfinite(v_ego)):
+  if not (lead.present and math.isfinite(lead.dRel) and math.isfinite(lead.vLead) and math.isfinite(v_ego)):
     return None
   v_ego = max(v_ego, 0.)
   if v_ego >= LAUNCH_ASSIST_ACCEL_BP[-1] or lead.vLead - v_ego < LAUNCH_ASSIST_MIN_V_REL:

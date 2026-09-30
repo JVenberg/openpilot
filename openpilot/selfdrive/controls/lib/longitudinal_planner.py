@@ -9,7 +9,8 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource, \
+                                                                        get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
@@ -25,9 +26,23 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
+# Launch assist: accel floor when pulling away from a stop behind a departing lead
+LAUNCH_ASSIST_ACCEL_BP = [0., 1.5, 3.0]
+LAUNCH_ASSIST_ACCEL_V = [1.0, 0.8, 0.0]
+LAUNCH_ASSIST_MIN_V_REL = 0.5  # m/s
+LAUNCH_ASSIST_GAP_MARGIN = 0.5  # m
+
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
+
+def get_launch_assist_accel(lead, v_ego, personality):
+  if not lead.status or v_ego >= LAUNCH_ASSIST_ACCEL_BP[-1] or lead.vLead - v_ego < LAUNCH_ASSIST_MIN_V_REL:
+    return None
+  desired_gap = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
+  if lead.dRel < desired_gap - LAUNCH_ASSIST_GAP_MARGIN:
+    return None
+  return float(np.interp(v_ego, LAUNCH_ASSIST_ACCEL_BP, LAUNCH_ASSIST_ACCEL_V))
 
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
@@ -134,6 +149,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     action_t =  self.CP.longitudinalActuatorDelay + DT_MDL
     output_a_target_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                               action_t=action_t)
+    launch_accel = get_launch_assist_accel(sm['radarState'].leadOne, v_ego, sm['selfdriveState'].personality)
+    if launch_accel is not None and not reset_state:
+      output_a_target_mpc = max(output_a_target_mpc, launch_accel)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop

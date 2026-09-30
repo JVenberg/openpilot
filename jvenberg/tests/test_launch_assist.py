@@ -36,8 +36,8 @@ PERSONALITIES = (Personality.relaxed, Personality.standard, Personality.aggressi
 MAX_ASSIST = max(ns["LAUNCH_ASSIST_ACCEL_V"])
 
 
-def lead(status=True, d=10., v=2.):
-  return SimpleNamespace(status=status, dRel=d, vLead=v)
+def lead(present=True, d=10., v=2.):
+  return SimpleNamespace(present=present, dRel=d, vLead=v)
 
 
 def check_output(a):
@@ -128,3 +128,12 @@ def test_closed_loop_lead_stops_abruptly():
 def test_closed_loop_stop_and_go_wave():
   prof = lambda t, v: 1.5 * math.sin(t * 1.3)
   assert simulate(prof, T=30.) > 4.0
+
+
+def test_real_radar_message_schema():
+  from openpilot.cereal import log as cereal_log
+  msg = cereal_log.RadarState.LeadData.new_message()
+  msg.present, msg.dRel, msg.vLead = True, 6.5, 1.0
+  assert assist(msg.as_reader(), 0., Personality.standard) == 1.0
+  msg.present = False
+  assert assist(msg.as_reader(), 0., Personality.standard) is None

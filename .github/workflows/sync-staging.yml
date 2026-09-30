@@ -11,7 +11,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Rebase and push
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Rebase onto latest upstream staging
+        id: rebase
         env:
           TOKEN: ${{ secrets.SYNC_PAT || github.token }}
         run: |
@@ -25,8 +28,23 @@ jobs:
           git fetch -q --depth=50 origin staging-launch
           UPSTREAM=$(git rev-parse upstream/staging)
           BASE=$(git log -1 --format=%H --grep="^sunnypilot v" origin/staging-launch)
-          if [ "$UPSTREAM" = "$BASE" ]; then echo "Already on latest staging ($UPSTREAM)"; exit 0; fi
-          git checkout -q "$UPSTREAM"
-          git cherry-pick "$BASE..origin/staging-launch"
+          if [ "$UPSTREAM" = "$BASE" ]; then
+            echo "Already on latest staging ($UPSTREAM); testing current branch"
+            git checkout -q origin/staging-launch
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            git checkout -q "$UPSTREAM"
+            git cherry-pick "$BASE..origin/staging-launch"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+
+      - name: Run launch-fix tests
+        run: repo/jvenberg/tests/run.sh
+
+      - name: Push
+        if: steps.rebase.outputs.push == 'true'
+        run: |
+          cd repo
           git push -f origin HEAD:staging-launch
-          echo "Rebased staging-launch onto $UPSTREAM"
+          echo "Rebased staging-launch onto ${{ steps.rebase.outputs.upstream }}"

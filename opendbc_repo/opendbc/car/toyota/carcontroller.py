@@ -25,6 +25,9 @@ VisualAlert = structs.CarControl.HUDControl.VisualAlert
 ACCEL_WINDUP_LIMIT = 4.0 * DT_CTRL * 3  # m/s^2 / frame
 ACCEL_WINDDOWN_LIMIT = -4.0 * DT_CTRL * 3  # m/s^2 / frame
 ACCEL_PID_UNWIND = 0.03 * DT_CTRL * 3  # m/s^2 / frame
+# Standstill brake-hold request to skip past when launching, instead of ramping up from stopAccel
+LAUNCH_UNWIND_FLOOR = -0.3  # m/s^2
+LAUNCH_UNWIND_MAX_SPEED = 0.5  # m/s
 
 MAX_PITCH_COMPENSATION = 1.5  # m/s^2
 
@@ -214,6 +217,8 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         # internal PCM gas command can get stuck unwinding from negative accel so we apply a generous rate limit
         pcm_accel_cmd = actuators.accel
         if CC.longActive:
+          if not stopping and actuators.accel > 0 and CS.out.vEgo < LAUNCH_UNWIND_MAX_SPEED:
+            self.prev_accel = max(self.prev_accel, LAUNCH_UNWIND_FLOOR)
           pcm_accel_cmd = rate_limit(pcm_accel_cmd, self.prev_accel, ACCEL_WINDDOWN_LIMIT, ACCEL_WINDUP_LIMIT)
         self.prev_accel = pcm_accel_cmd
 

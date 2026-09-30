@@ -1,0 +1,31 @@
+name: Rebase staging-launch onto sunnypilot staging
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebase and push
+        env:
+          TOKEN: ${{ secrets.SYNC_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then echo "::error::Add a SYNC_PAT secret (fine-grained PAT, Contents + Workflows read/write on this repo)"; exit 1; fi
+          git init -q repo && cd repo
+          git config user.name "fork-sync"
+          git config user.email "fork-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/sunnypilot/sunnypilot.git
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 upstream staging
+          git fetch -q --depth=2 origin staging-launch
+          UPSTREAM=$(git rev-parse upstream/staging)
+          BASE=$(git rev-parse origin/staging-launch~1)
+          if [ "$UPSTREAM" = "$BASE" ]; then echo "Already on latest staging ($UPSTREAM)"; exit 0; fi
+          git checkout -q "$UPSTREAM"
+          git cherry-pick origin/staging-launch
+          git push -f origin HEAD:staging-launch
+          echo "Rebased staging-launch onto $UPSTREAM"

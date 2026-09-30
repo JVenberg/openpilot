@@ -28,7 +28,7 @@ PLANNER_EVERY = round(DT_MDL / DT_CTRL)
 PCM_DELAY = 0.05  # s, hybrid
 PCM_TAU = 0.3  # s
 LAUNCH_CMD = 0.3  # m/s^2
-LAUNCH_LAG = 0.8  # s from sent accel >= LAUNCH_CMD to wheels turning, measured on a 2021 RAV4 Prime
+WHEEL_SPEED_MIN = 0.25  # m/s, RAV4 Prime wheel speeds read 0 below this
 
 
 @dataclass
@@ -66,7 +66,7 @@ class Sim:
 
     self.x = self.v = self.a = 0.
     self.a_target, self.should_stop = 0., False
-    self.t, self.launch_cmd_at = 0., None
+    self.t = 0.
     self.pcm_hist = deque([0.] * max(1, round(PCM_DELAY / DT_CTRL)))
     self.radar_hist = deque(maxlen=max(1, round(sc.radar_delay / DT_MDL)) + 1)
     self.lead = Lead(x=sc.initial_gap if sc.initial_gap is not None else 60.)
@@ -102,8 +102,9 @@ class Sim:
     model.modelV2.meta.disengagePredictions.gasPressProbs = [1.] * 6
 
     cs = messaging.new_message('carState')
-    cs.carState.vEgo, cs.carState.aEgo = float(self.v), float(self.a)
-    cs.carState.standstill = self.v < 0.01
+    v_meas, a_meas = self.measured()
+    cs.carState.vEgo, cs.carState.aEgo = v_meas, a_meas
+    cs.carState.standstill = v_meas == 0.
     cs.carState.vCruise = cs.carState.vCruiseCluster = 50. * 3.6
     ctl = messaging.new_message('controlsState')
     ctl.controlsState.longControlState = self.loc.long_control_state
@@ -122,8 +123,12 @@ class Sim:
     self.planner.update(sm)
     self.a_target, self.should_stop = float(self.planner.output_a_target), bool(self.planner.output_should_stop)
 
+  def measured(self):
+    return (float(self.v), float(self.a)) if self.v >= WHEEL_SPEED_MIN else (0., 0.)
+
   def control_step(self):
-    CS = structs.CarState(vEgo=self.v, vEgoRaw=self.v, aEgo=self.a, standstill=self.v < 0.01)
+    v_meas, a_meas = self.measured()
+    CS = structs.CarState(vEgo=v_meas, vEgoRaw=v_meas, aEgo=a_meas, standstill=v_meas == 0.)
     CS.cruiseState.enabled = True
     accel = self.loc.update(True, CS, self.a_target, self.should_stop, [-3.5, 2.0])
 
@@ -142,14 +147,9 @@ class Sim:
     self.t += DT_CTRL
     self.pcm_hist.append(pcm_cmd)
     cmd = self.pcm_hist.popleft()
-    if self.v <= 0.:
-      if cmd < LAUNCH_CMD:
-        self.launch_cmd_at = None
-      elif self.launch_cmd_at is None:
-        self.launch_cmd_at = self.t
-      if self.launch_cmd_at is None or self.t - self.launch_cmd_at < LAUNCH_LAG:
-        self.v, self.a = 0., 0.
-        return
+    if self.v <= 0. and cmd < LAUNCH_CMD:
+      self.a = 0.
+      return
     self.a += (cmd - self.a) * DT_CTRL / PCM_TAU
     self.v = max(0., self.v + self.a * DT_CTRL)
     if self.v == 0.:
@@ -257,6 +257,7 @@ SCENARIOS = [
   Scenario("lead turns off, stopped queue 9m ahead", 12., const(1.5), lead_turns_off(2.0, 9.0)),
   Scenario("radar noise+spikes, lead never moves", 15., lambda t, L: 0., radar_noise=spikes()),
   Scenario("big radar spikes (2 m/s), lead never moves", 15., lambda t, L: 0., radar_noise=spikes(0.3, 2.0, 2.0, 0.5)),
+  Scenario("single 3 m/s radar spike for 0.4s (seen on car)", 10., lambda t, L: 0., radar_noise=spikes(0.05, 3.0, 100., 0.4)),
   Scenario("radar delay 0.3s", 12., const(1.5), radar_delay=0.3),
   Scenario("lead flickers in/out", 12., const(1.5), flicker()),
   Scenario("lead creeps at 0.5 m/s steadily", 10., lambda t, L: 1.0 if L.v < 0.5 else 0.),

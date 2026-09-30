@@ -22,11 +22,11 @@ jobs:
           git remote add upstream https://github.com/sunnypilot/sunnypilot.git
           git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch -q --depth=1 upstream staging
-          git fetch -q --depth=2 origin staging-launch
+          git fetch -q --depth=50 origin staging-launch
           UPSTREAM=$(git rev-parse upstream/staging)
-          BASE=$(git rev-parse origin/staging-launch~1)
+          BASE=$(git log -1 --format=%H --grep="^sunnypilot v" origin/staging-launch)
           if [ "$UPSTREAM" = "$BASE" ]; then echo "Already on latest staging ($UPSTREAM)"; exit 0; fi
           git checkout -q "$UPSTREAM"
-          git cherry-pick origin/staging-launch
+          git cherry-pick "$BASE..origin/staging-launch"
           git push -f origin HEAD:staging-launch
           echo "Rebased staging-launch onto $UPSTREAM"

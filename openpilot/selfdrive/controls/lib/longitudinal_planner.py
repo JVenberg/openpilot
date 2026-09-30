@@ -31,6 +31,7 @@ LAUNCH_ASSIST_ACCEL_BP = [0., 1.5, 3.0]
 LAUNCH_ASSIST_ACCEL_V = [1.0, 0.8, 0.0]
 LAUNCH_ASSIST_MIN_V_REL = 0.5  # m/s
 LAUNCH_ASSIST_GAP_MARGIN = 0.5  # m
+LAUNCH_ASSIST_DEBOUNCE = 0.3  # s, rides out radar vLead spikes seen at standstill
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -82,6 +83,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
+    self.launch_assist_t = 0.
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
@@ -154,7 +156,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                               action_t=action_t)
     launch_accel = get_launch_assist_accel(sm['radarState'].leadOne, v_ego, sm['selfdriveState'].personality)
-    if launch_accel is not None and not reset_state:
+    self.launch_assist_t = self.launch_assist_t + self.dt if launch_accel is not None and not reset_state else 0.
+    if self.launch_assist_t >= LAUNCH_ASSIST_DEBOUNCE:
       output_a_target_mpc = max(output_a_target_mpc, launch_accel)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration

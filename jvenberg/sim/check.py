@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent / "harness.py"
@@ -31,7 +32,7 @@ MUST_NOT_MOVE = {"experimental mode, model says stop (red light)"}
 
 def run(root):
   root = Path(root).resolve()
-  env = dict(os.environ, PYTHONPATH=os.pathsep.join(str(root / s) for s in SUBMODULES))
+  env = dict(os.environ, PYTHONPATH=os.pathsep.join(str(root / s) for s in SUBMODULES), PARAMS_ROOT=tempfile.mkdtemp())
   out = subprocess.run([sys.executable, str(HARNESS)], env=env, cwd=root, check=True, stdout=subprocess.PIPE, text=True).stdout
   return {r["scenario"]: r for r in json.loads(out)}
 

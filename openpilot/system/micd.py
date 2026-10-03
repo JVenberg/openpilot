@@ -2,6 +2,7 @@
 import numpy as np
 from functools import cache
 import threading
+import time
 
 from openpilot.cereal import messaging
 from openpilot.common.realtime import Ratekeeper
@@ -102,20 +103,26 @@ class Mic:
 
         self.measurements = self.measurements[FFT_SAMPLES:]
 
-  @retry(attempts=10, delay=3)
+  @retry(attempts=20, delay=3)  # audio device can take ~30s to appear after boot
   def get_stream(self, sd):
-    # reload sounddevice to reinitialize portaudio
-    sd._terminate()
-    sd._initialize()
-    return sd.InputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
+    try:
+      # reload sounddevice to reinitialize portaudio
+      sd._terminate()
+      sd._initialize()
+      return sd.InputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
+    except Exception:
+      cloudlog.exception("micd get_stream attempt failed")
+      raise
 
   def micd_thread(self):
     # sounddevice must be imported after forking processes
     import sounddevice as sd
     patch_sounddevice(sd)
 
+    t0 = time.monotonic()
     with self.get_stream(sd) as stream:
-      cloudlog.info(f"micd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
+      waited = time.monotonic() - t0
+      cloudlog.info(f"micd stream started: {waited=:.1f} {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
       while True:
         self.update()
 

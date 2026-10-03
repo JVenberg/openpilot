@@ -168,12 +168,16 @@ class Soundd(QuietMode):
     volume = ((weighted_db - AMBIENT_DB) / DB_SCALE) * (MAX_VOLUME - MIN_VOLUME) + MIN_VOLUME
     return math.pow(VOLUME_BASE, (np.clip(volume, MIN_VOLUME, MAX_VOLUME) - 1))
 
-  @retry(attempts=10, delay=3)
+  @retry(attempts=20, delay=3)  # audio device can take ~30s to appear after boot
   def get_stream(self, sd):
-    # reload sounddevice to reinitialize portaudio
-    sd._terminate()
-    sd._initialize()
-    return sd.OutputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
+    try:
+      # reload sounddevice to reinitialize portaudio
+      sd._terminate()
+      sd._initialize()
+      return sd.OutputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
+    except Exception:
+      cloudlog.exception("soundd get_stream attempt failed")
+      raise
 
   def soundd_thread(self):
     # sounddevice must be imported after forking processes
@@ -182,10 +186,12 @@ class Soundd(QuietMode):
 
     sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP', 'soundPressure'])
 
+    t0 = time.monotonic()
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)
 
-      cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
+      waited = time.monotonic() - t0
+      cloudlog.info(f"soundd stream started: {waited=:.1f} {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
       while True:
         sm.update(0)
 

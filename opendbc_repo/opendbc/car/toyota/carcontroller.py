@@ -35,6 +35,8 @@ MAX_PITCH_COMPENSATION = 1.5  # m/s^2
 # EPS faults if you apply torque while the steering rate is above 100 deg/s for too long
 MAX_STEER_RATE = 100  # deg/s
 MAX_STEER_RATE_FRAMES = 17  # tx control frames needed before torque can be cut
+# RAV4 EPS still faults with periodic cuts, so release torque entirely until the wheel slows
+STEER_RATE_RELEASE_FRAMES = 50
 
 # EPS allows user torque above threshold for 50 frames before permanently faulting
 MAX_USER_TORQUE = 500
@@ -65,6 +67,7 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.standstill_req = False
     self.permit_braking = True
     self.steer_rate_counter = 0
+    self.steer_rate_release_frames = 0
     self.distance_button = 0
 
     # *** start long control state ***
@@ -117,6 +120,15 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     # >100 degree/sec steering fault prevention
     self.steer_rate_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringRateDeg) >= MAX_STEER_RATE, lat_active,
                                                                       self.steer_rate_counter, MAX_STEER_RATE_FRAMES)
+
+    if lat_active and abs(CS.out.steeringRateDeg) >= MAX_STEER_RATE:
+      self.steer_rate_release_frames = STEER_RATE_RELEASE_FRAMES
+    elif self.steer_rate_release_frames > 0:
+      self.steer_rate_release_frames -= 1
+    if self.steer_rate_release_frames > 0:
+      apply_torque = apply_meas_steer_torque_limits(0, self.last_torque, CS.out.steeringTorqueEps, self.params)
+      if apply_torque == 0:
+        apply_steer_req = False
 
     if not lat_active:
       apply_torque = 0

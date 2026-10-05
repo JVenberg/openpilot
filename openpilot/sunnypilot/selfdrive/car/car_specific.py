@@ -9,6 +9,7 @@ from openpilot.cereal import log, custom
 from opendbc.car import structs
 
 from opendbc.car.chrysler.values import RAM_DT
+from opendbc.car.toyota.carcontroller import MAX_STEER_RATE, STEER_RATE_RELEASE_FRAMES
 from openpilot.selfdrive.selfdrived.events import Events
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
@@ -23,8 +24,9 @@ class CarSpecificEventsSP:
     self.CP_SP = CP_SP
 
     self.low_speed_alert = False
+    self.steer_rate_release_frames = 0
 
-  def update(self, CS: structs.CarState, events: Events):
+  def update(self, CS: structs.CarState, events: Events, lat_active: bool = False):
     events_sp = EventsSP()
 
     if self.CP.brand == 'chrysler':
@@ -43,6 +45,15 @@ class CarSpecificEventsSP:
         events.add(EventName.belowSteerSpeed)
 
     elif self.CP.brand == 'toyota':
+      # mirrors the steering release in the Toyota CarController
+      torque_control = self.CP.steerControlType == structs.CarParams.SteerControlType.torque
+      if torque_control and lat_active and abs(CS.steeringRateDeg) >= MAX_STEER_RATE:
+        self.steer_rate_release_frames = STEER_RATE_RELEASE_FRAMES
+      elif self.steer_rate_release_frames > 0:
+        self.steer_rate_release_frames -= 1
+      if lat_active and self.steer_rate_release_frames > 0:
+        events_sp.add(EventNameSP.steerRateRelease)
+
       if self.CP.openpilotLongitudinalControl:
         if CS.cruiseState.standstill and not CS.brakePressed and self.CP_SP.enableGasInterceptor:
           if events.has(EventName.resumeRequired):

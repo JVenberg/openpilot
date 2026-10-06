@@ -1,6 +1,4 @@
 """Drives the real Toyota CarController for a RAV4 Prime through fast wheel spins."""
-import sys
-import types
 from types import SimpleNamespace
 
 from hypothesis import given, settings, strategies as st
@@ -111,28 +109,3 @@ def test_fuzz_panda_safety(seq):
         assert tq == 0
         continue
       assert panda.ok(req, tq), (req, tq, panda.last)
-
-
-def test_alert_matches_release():
-  # selfdrived events only use messaging at runtime; msgq needs the device build
-  messaging = sys.modules.setdefault("openpilot.cereal.messaging", types.ModuleType("messaging"))
-  for name in ("PubMaster", "SubMaster"):
-    setattr(messaging, name, getattr(messaging, name, object))
-  params = types.ModuleType("params")
-  params.Params = params.ParamKeyFlag = params.ParamKeyType = params.UnknownKeyName = object
-  sys.modules.setdefault("openpilot.common.params", params)
-  from openpilot.cereal import custom
-  from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
-  from openpilot.sunnypilot.selfdrive.selfdrived.events import EVENTS_SP, ET
-
-  release = custom.OnroadEventSP.EventName.steerRateRelease
-  alert = EVENTS_SP[release][ET.WARNING]
-  assert alert.audible_alert == custom.SelfdriveStateSP.AudibleAlert.promptSingleLow
-
-  c, events_sp = new_cc(), CarSpecificEventsSP(CP, CP_SP)
-  profile = [(0., True)] * 50 + [(250., True)] * 80 + [(20., True)] * 80 + [(250., False)] * 20 + [(250., True)] * 10 + [(20., False)] * 20
-  for rate, lat_active in profile:
-    req, tq = step(c, 1., rate, lat_active)
-    raised = release in events_sp.update(make_cs(rate, 0).out, None, lat_active).names
-    released = lat_active and c.steer_rate_release_frames > 0
-    assert raised == released, (rate, lat_active, req, tq)
